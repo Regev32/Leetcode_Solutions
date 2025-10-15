@@ -44,8 +44,8 @@ for dir in easy medium hard; do
       fi
       # Remove any trailing extension (e.g., .py) from title
       title="$(echo "$title" | sed 's/\.[^.]*$//')"
-      # Replace spaces with '-' and lowercase everything
-      slug="$(echo "$title" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9\-')"
+      # Replace non-alphanumeric with single hyphen, lowercase, and trim leading/trailing hyphens
+      slug="$(echo "$title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g' | sed 's/^-*//;s/-*$//')"
       if [[ -z "$slug" ]]; then
         continue
       fi
