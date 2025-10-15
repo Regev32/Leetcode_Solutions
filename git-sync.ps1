@@ -16,12 +16,12 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# Choose a commit message
+# Commit message
 if ([string]::IsNullOrWhiteSpace($Message)) {
     $Message = "sync: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 }
 
-# Detect branch name reliably
+# Detect branch
 $branch = (& git symbolic-ref --quiet --short HEAD) 2>$null
 if ([string]::IsNullOrWhiteSpace($branch) -or $branch -eq 'HEAD') {
     $remotes = (& git remote 2>$null)
@@ -42,57 +42,62 @@ Write-Host "Repo:   $repo"
 Write-Host "Branch: $branch"
 Write-Host "----------------------------------------"
 
-# Determine if the repo already has any commits (no fatal output)
+# Has any commit yet? (quiet)
 $null = & git show-ref --head 2>$null
 $hasCommits = ($LASTEXITCODE -eq 0)
 
-# See if 'origin' exists
+# Has origin?
 $remotes = (& git remote 2>$null)
 $hasOrigin = ($remotes -match '(^|\s)origin(\s|$)')
 
 # -------------------------------
-# Normalize filenames & ensure empty dirs are tracked
+# Rename solution files -> "NNN-slugified-title.py"
 # -------------------------------
-Write-Host "# Normalize files and track empty folders"
-
-# 1) Convert extensionless files under easy/medium/hard to .py
+Write-Host "# Normalizing LeetCode filenames..."
 $lcDirs = @("easy","medium","hard")
+
+# Helper: slugify title
+function New-Slug([string]$s) {
+    $t = $s.ToLower()
+    $t = [regex]::Replace($t, '[^a-z0-9]+', '-')   # non-alnum -> hyphen
+    $t = $t.Trim('-')
+    return $t
+}
+
 foreach ($d in $lcDirs) {
-    if (Test-Path $d) {
-        # Only files directly or in subfolders of these buckets
-        Get-ChildItem -Path $d -File -Recurse | ForEach-Object {
-            $f = $_
-            if ([string]::IsNullOrWhiteSpace($f.Extension)) {
-                $newName = "$($f.Name).py"
-                $newPath = Join-Path $f.DirectoryName $newName
-                if (-not (Test-Path $newPath)) {
-                    Rename-Item -LiteralPath $f.FullName -NewName $newName
-                    Write-Host "  + Renamed: $($f.FullName.Replace($repoRoot+'\','')) -> $($newPath.Replace($repoRoot+'\',''))"
+    if (-not (Test-Path $d)) { continue }
+    Get-ChildItem -Path $d -File -Recurse | ForEach-Object {
+        $file = $_
+        # Skip files that already match desired pattern exactly
+        if ($file.Name -match '^\d+-[a-z0-9-]+\.py$') { return }
+
+        # Try to extract "NNN. Title ..." (tolerant)
+        $m = [regex]::Match($file.Name, '^\s*(\d+)\.\s*(.+?)(?:\.\w+)?$')
+        if (-not $m.Success) {
+            # fallback: "NNN something"
+            $m = [regex]::Match($file.BaseName, '^\s*(\d+)[\.\s_-]+(.+)$')
+        }
+        if ($m.Success) {
+            $id    = $m.Groups[1].Value
+            $title = $m.Groups[2].Value
+            $slug  = New-Slug $title
+            if ([string]::IsNullOrWhiteSpace($slug)) { return }
+            $newName = "$id-$slug.py"
+            if ($file.Name -ne $newName) {
+                $target = Join-Path $file.DirectoryName $newName
+                if (-not (Test-Path $target)) {
+                    Rename-Item -LiteralPath $file.FullName -NewName $newName
+                    Write-Host "  + $($file.Name) -> $newName"
                 } else {
-                    Write-Host "  ! Skipped (target exists): $($f.FullName.Replace($repoRoot+'\',''))"
+                    Write-Host "  ! Skipped (exists): $newName in $($file.DirectoryName)"
                 }
             }
         }
     }
 }
 
-# 2) Ensure empty directories (like 'hard') get tracked via .gitkeep
-foreach ($d in $lcDirs) {
-    if (Test-Path $d) {
-        # If directory has no files (recursively), drop a .gitkeep
-        $hasAnyFiles = @(Get-ChildItem -Path $d -File -Recurse) -ne @()
-        if (-not $hasAnyFiles) {
-            $keep = Join-Path $d ".gitkeep"
-            if (-not (Test-Path $keep)) {
-                New-Item -ItemType File -Path $keep | Out-Null
-                Write-Host "  + Added: $($keep.Replace($repoRoot+'\','')) (to track empty dir)"
-            }
-        }
-    }
-}
-
 # -------------------------------
-# Pull (when appropriate)
+# Pull (only when appropriate)
 # -------------------------------
 if ($hasCommits -and $hasOrigin) {
     git ls-remote --exit-code --heads origin $branch *> $null
@@ -114,29 +119,18 @@ if ($hasCommits -and $hasOrigin) {
 Write-Host "Staging changes..."
 git add -A
 
-# Commit only if there are staged files
 $staged = git diff --cached --name-only
 if (-not [string]::IsNullOrWhiteSpace($staged)) {
     Write-Host "Committing: $Message"
     git commit -m "$Message"
     $hasCommits = $true
 } else {
-    if (-not $hasCommits) {
-        # Completely empty repo: ensure at least one file so we can commit
-        $rootKeep = ".gitkeep"
-        if (-not (Test-Path $rootKeep)) { New-Item -ItemType File -Path $rootKeep | Out-Null }
-        git add $rootKeep
-        Write-Host "Creating initial commit..."
-        git commit -m "$Message"
-        $hasCommits = $true
-    } else {
-        Write-Host "No staged changes to commit."
-    }
+    Write-Host "No staged changes to commit."
 }
 
 if ($hasCommits) {
     if (-not $hasOrigin) {
-        Write-Host "No 'origin' remote configured. Add it first, e.g.:"
+        Write-Host "No 'origin' remote configured. Add it, e.g.:"
         Write-Host "  git remote add origin https://github.com/<user>/<repo>.git"
         Write-Host "Then rerun this script."
         exit 0
