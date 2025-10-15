@@ -25,16 +25,33 @@ echo "🧹 Renaming files for consistency..."
 find "$ROOT" -type f -name "*.py" | while read -r f; do
   dirname="$(dirname "$f")"
   base="$(basename "$f")"
-  # Match "13. Roman to Integer.py"
+  # Skip files that already match the desired pattern
+  if [[ "$base" =~ ^[0-9]+-[a-z0-9-]+\.py$ ]]; then
+    continue
+  fi
+  # Match "NNN. Title ..." (e.g., "13. Roman to Integer.py")
   if [[ "$base" =~ ^([0-9]+)\.\ (.*)\.py$ ]]; then
     num="${BASH_REMATCH[1]}"
     title="${BASH_REMATCH[2]}"
-    # Replace spaces with '-' and lowercase everything
-    slug="$(echo "$title" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9\-')"
-    newname="${dirname}/${num}-${slug}.py"
-    if [[ "$f" != "$newname" ]]; then
-      echo "→ $base  →  $(basename "$newname")"
+  # Fallback: match "NNN something" (e.g., "13_Roman_to_Integer")
+  elif [[ "$base" =~ ^([0-9]+)[\._\ ]+(.+)\.py$ ]]; then
+    num="${BASH_REMATCH[1]}"
+    title="${BASH_REMATCH[2]}"
+  else
+    continue
+  fi
+  # Replace spaces with '-' and lowercase everything
+  slug="$(echo "$title" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9\-')"
+  if [[ -z "$slug" ]]; then
+    continue
+  fi
+  newname="${dirname}/${num}-${slug}.py"
+  if [[ "$f" != "$newname" ]]; then
+    if [[ ! -f "$newname" ]]; then
+      echo "→ $base → $(basename "$newname")"
       mv "$f" "$newname"
+    else
+      echo "⚠️ Skipped (exists): $(basename "$newname") in $dirname"
     fi
   fi
 done
