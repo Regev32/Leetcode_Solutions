@@ -43,20 +43,33 @@ echo "✅ Rename check complete."
 # -------------------------------
 # 🔁 Sync operations
 # -------------------------------
-echo "⬇️  Fetching..."
-git fetch --all --prune
-
-echo "🔁 Pulling with rebase..."
-git pull --rebase origin "$BRANCH"
-
 echo "➕ Staging changes..."
 git add -A
 
+# Check for staged changes and commit them if present
 if ! git diff --cached --quiet; then
-  echo "✅ Committing: $MSG"
+  echo "✅ Committing staged changes: $MSG"
   git commit -m "$MSG"
+fi
+
+echo "⬇️  Fetching..."
+git fetch --all --prune
+
+# Check if the branch exists on the remote
+if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+  echo "🔁 Pulling with rebase..."
+  git pull --rebase origin "$BRANCH"
 else
-  echo "ℹ️  No staged changes to commit."
+  echo "ℹ️  Remote branch 'origin/$BRANCH' not found. Will push after committing."
+fi
+
+# Stage any new changes (e.g., from renamed files or pull conflicts)
+echo "➕ Staging any new changes..."
+git add -A
+
+if ! git diff --cached --quiet; then
+  echo "✅ Committing new changes: $MSG"
+  git commit -m "$MSG"
 fi
 
 echo "⬆️  Pushing..."

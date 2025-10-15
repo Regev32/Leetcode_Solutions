@@ -53,7 +53,12 @@ Run the following to automatically:
 - Commit & push your work to GitHub  
 
 ```powershell
-.\git-sync.ps1 "add new DP solutions"
+.\git-sync.ps1
+```
+
+or add a commit message
+```powershell
+.\git-sync.ps1 "<commit message>"
 ```
 
 If no message is given, it uses a timestamped message automatically.
@@ -74,7 +79,11 @@ chmod +x git-sync.sh
 
 Then use:
 ```bash
-./git-sync.sh "add array problems"
+./git-sync.sh
+```
+or add a commit message
+```bash
+./git-sync.sh "<commit message>"
 ```
 
 If no message is provided, it creates a default one like:
