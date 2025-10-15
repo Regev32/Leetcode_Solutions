@@ -22,31 +22,27 @@ if ([string]::IsNullOrWhiteSpace($Message)) {
 }
 
 # Detect branch name reliably
-# Try short ref; if 'HEAD' (detached or unborn), try remote HEAD; else fall back to 'main'
 $branch = (& git symbolic-ref --quiet --short HEAD) 2>$null
 if ([string]::IsNullOrWhiteSpace($branch) -or $branch -eq 'HEAD') {
     $remotes = (& git remote 2>$null)
     $hasOrigin = ($remotes -match '(^|\s)origin(\s|$)')
     if ($hasOrigin) {
         $remoteHead = (& git remote show origin 2>$null | Select-String "HEAD branch:").ToString()
-        if ($remoteHead -match "HEAD branch:\s+(\S+)") {
-            $branch = $Matches[1]
-        } else {
-            $branch = "main"
-        }
+        if ($remoteHead -match "HEAD branch:\s+(\S+)") { $branch = $Matches[1] } else { $branch = "main" }
     } else {
         $branch = "main"
     }
 }
 
-$repo = Split-Path -Leaf (git rev-parse --show-toplevel)
+$repoRoot = (git rev-parse --show-toplevel).Trim()
+$repo = Split-Path -Leaf $repoRoot
+Set-Location $repoRoot
 
 Write-Host "Repo:   $repo"
 Write-Host "Branch: $branch"
 Write-Host "----------------------------------------"
 
-# Determine if the repo already has any commits (safe: no fatal output)
-# If there are no refs, this comes back empty and exit code 1 (but no stderr noise).
+# Determine if the repo already has any commits (no fatal output)
 $null = & git show-ref --head 2>$null
 $hasCommits = ($LASTEXITCODE -eq 0)
 
@@ -54,7 +50,50 @@ $hasCommits = ($LASTEXITCODE -eq 0)
 $remotes = (& git remote 2>$null)
 $hasOrigin = ($remotes -match '(^|\s)origin(\s|$)')
 
-# Pull only if we have local commits and the remote branch exists
+# -------------------------------
+# Normalize filenames & ensure empty dirs are tracked
+# -------------------------------
+Write-Host "# Normalize files and track empty folders"
+
+# 1) Convert extensionless files under easy/medium/hard to .py
+$lcDirs = @("easy","medium","hard")
+foreach ($d in $lcDirs) {
+    if (Test-Path $d) {
+        # Only files directly or in subfolders of these buckets
+        Get-ChildItem -Path $d -File -Recurse | ForEach-Object {
+            $f = $_
+            if ([string]::IsNullOrWhiteSpace($f.Extension)) {
+                $newName = "$($f.Name).py"
+                $newPath = Join-Path $f.DirectoryName $newName
+                if (-not (Test-Path $newPath)) {
+                    Rename-Item -LiteralPath $f.FullName -NewName $newName
+                    Write-Host "  + Renamed: $($f.FullName.Replace($repoRoot+'\','')) -> $($newPath.Replace($repoRoot+'\',''))"
+                } else {
+                    Write-Host "  ! Skipped (target exists): $($f.FullName.Replace($repoRoot+'\',''))"
+                }
+            }
+        }
+    }
+}
+
+# 2) Ensure empty directories (like 'hard') get tracked via .gitkeep
+foreach ($d in $lcDirs) {
+    if (Test-Path $d) {
+        # If directory has no files (recursively), drop a .gitkeep
+        $hasAnyFiles = @(Get-ChildItem -Path $d -File -Recurse) -ne @()
+        if (-not $hasAnyFiles) {
+            $keep = Join-Path $d ".gitkeep"
+            if (-not (Test-Path $keep)) {
+                New-Item -ItemType File -Path $keep | Out-Null
+                Write-Host "  + Added: $($keep.Replace($repoRoot+'\','')) (to track empty dir)"
+            }
+        }
+    }
+}
+
+# -------------------------------
+# Pull (when appropriate)
+# -------------------------------
 if ($hasCommits -and $hasOrigin) {
     git ls-remote --exit-code --heads origin $branch *> $null
     if ($LASTEXITCODE -eq 0) {
@@ -69,6 +108,9 @@ if ($hasCommits -and $hasOrigin) {
     Write-Host "No commits yet in this repo. Will create the initial commit if needed."
 }
 
+# -------------------------------
+# Stage, commit, push
+# -------------------------------
 Write-Host "Staging changes..."
 git add -A
 
@@ -80,11 +122,10 @@ if (-not [string]::IsNullOrWhiteSpace($staged)) {
     $hasCommits = $true
 } else {
     if (-not $hasCommits) {
-        # Completely empty repo: create a tiny placeholder so first commit can exist
-        if (-not (Test-Path ".gitkeep")) {
-            New-Item -ItemType File -Path ".gitkeep" | Out-Null
-        }
-        git add .gitkeep
+        # Completely empty repo: ensure at least one file so we can commit
+        $rootKeep = ".gitkeep"
+        if (-not (Test-Path $rootKeep)) { New-Item -ItemType File -Path $rootKeep | Out-Null }
+        git add $rootKeep
         Write-Host "Creating initial commit..."
         git commit -m "$Message"
         $hasCommits = $true
@@ -93,7 +134,6 @@ if (-not [string]::IsNullOrWhiteSpace($staged)) {
     }
 }
 
-# Push if we now have commits
 if ($hasCommits) {
     if (-not $hasOrigin) {
         Write-Host "No 'origin' remote configured. Add it first, e.g.:"
@@ -101,7 +141,6 @@ if ($hasCommits) {
         Write-Host "Then rerun this script."
         exit 0
     }
-
     Write-Host "Pushing to origin/$branch..."
     git push -u origin $branch
 } else {
