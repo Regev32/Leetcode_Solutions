@@ -1,144 +1,128 @@
-# git-sync.ps1 — Windows PowerShell
-# Usage:
-#   .\git-sync.ps1 "your commit message"
-# If no message is provided, a timestamped default is used.
-
+#Requires -Version 5.1
 param(
-    [string]$Message
+  [string]$Message = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-# Ensure we're in a Git repo
-git rev-parse --is-inside-work-tree *> $null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: Not inside a Git repository."
-    exit 1
+function Write-Section($title) {
+  Write-Host "----------------------------------------"
+  Write-Host $title
 }
 
-# Commit message
-if ([string]::IsNullOrWhiteSpace($Message)) {
-    $Message = "sync: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+function Get-Branch {
+  (git rev-parse --abbrev-ref HEAD).Trim()
 }
 
-# Detect branch
-$branch = (& git symbolic-ref --quiet --short HEAD) 2>$null
-if ([string]::IsNullOrWhiteSpace($branch) -or $branch -eq 'HEAD') {
-    $remotes = (& git remote 2>$null)
-    $hasOrigin = ($remotes -match '(^|\s)origin(\s|$)')
-    if ($hasOrigin) {
-        $remoteHead = (& git remote show origin 2>$null | Select-String "HEAD branch:").ToString()
-        if ($remoteHead -match "HEAD branch:\s+(\S+)") { $branch = $Matches[1] } else { $branch = "main" }
-    } else {
-        $branch = "main"
+function Is-RepoRoot {
+  try { git rev-parse --show-toplevel *> $null; return $true } catch { return $false }
+}
+
+function Git-IsDirty {
+  git diff --quiet; $code1 = $LASTEXITCODE
+  git diff --cached --quiet; $code2 = $LASTEXITCODE
+  return -not (($code1 -eq 0) -and ($code2 -eq 0))
+}
+
+function Slugify($s) {
+  $s = $s.ToLower()
+  $s = $s -replace "[^a-z0-9]+","-"
+  $s = $s -replace "^-+","" -replace "-+$",""
+  return $s
+}
+
+function Normalize-LeetCode-Filenames {
+  Write-Host "# Normalizing LeetCode filenames..."
+  # Rename files like "123. Some Title[... optional stuff ...][.py]" -> "123-some-title.py"
+  $files = Get-ChildItem -Recurse -File | Where-Object {
+    $_.BaseName -match '^\d+\.\s'
+  }
+
+  foreach ($f in $files) {
+    $m = [regex]::Match($f.BaseName, '^(?<num>\d+)\.\s*(?<title>.+?)$')
+    if (-not $m.Success) { continue }
+    $num   = $m.Groups['num'].Value
+    $title = $m.Groups['title'].Value
+
+    $slug = Slugify $title
+    if ([string]::IsNullOrWhiteSpace($slug)) { continue }
+
+    $newName = "$num-$slug"
+    if ($f.Extension -ne ".py") { $newName += ".py" } else { $newName += $f.Extension }
+
+    $dest = Join-Path $f.DirectoryName $newName
+    if ($dest -ne $f.FullName) {
+      if (-not (Test-Path $dest)) {
+        Write-Host ("  + {0} -> {1}" -f $f.BaseName, (Split-Path -Leaf $dest))
+        Move-Item -LiteralPath $f.FullName -Destination $dest
+      }
+      else {
+        Write-Warning "  ! Skipped rename (target exists): $dest"
+      }
     }
+  }
 }
 
-$repoRoot = (git rev-parse --show-toplevel).Trim()
-$repo = Split-Path -Leaf $repoRoot
-Set-Location $repoRoot
-
-Write-Host "Repo:   $repo"
-Write-Host "Branch: $branch"
-Write-Host "----------------------------------------"
-
-# Has any commit yet? (quiet)
-$null = & git show-ref --head 2>$null
-$hasCommits = ($LASTEXITCODE -eq 0)
-
-# Has origin?
-$remotes = (& git remote 2>$null)
-$hasOrigin = ($remotes -match '(^|\s)origin(\s|$)')
-
-# -------------------------------
-# Rename solution files -> "NNN-slugified-title.py"
-# -------------------------------
-Write-Host "# Normalizing LeetCode filenames..."
-$lcDirs = @("easy","medium","hard")
-
-# Helper: slugify title
-function New-Slug([string]$s) {
-    $t = $s.ToLower()
-    $t = [regex]::Replace($t, '[^a-z0-9]+', '-')   # non-alnum -> hyphen
-    $t = $t.Trim('-')
-    return $t
+if (-not (Is-RepoRoot)) {
+  throw "Run this script from inside a Git repository."
 }
 
-foreach ($d in $lcDirs) {
-    if (-not (Test-Path $d)) { continue }
-    Get-ChildItem -Path $d -File -Recurse | ForEach-Object {
-        $file = $_
-        # Skip files that already match desired pattern exactly
-        if ($file.Name -match '^\d+-[a-z0-9-]+\.py$') { return }
+$repo = (git rev-parse --show-toplevel).Trim()
+$branch = Get-Branch
 
-        # Try to extract "NNN. Title ..." (tolerant)
-        $m = [regex]::Match($file.Name, '^\s*(\d+)\.\s*(.+?)(?:\.\w+)?$')
-        if (-not $m.Success) {
-            # fallback: "NNN something"
-            $m = [regex]::Match($file.BaseName, '^\s*(\d+)[\.\s_-]+(.+)$')
-        }
-        if ($m.Success) {
-            $id    = $m.Groups[1].Value
-            $title = $m.Groups[2].Value
-            $slug  = New-Slug $title
-            if ([string]::IsNullOrWhiteSpace($slug)) { return }
-            $newName = "$id-$slug.py"
-            if ($file.Name -ne $newName) {
-                $target = Join-Path $file.DirectoryName $newName
-                if (-not (Test-Path $target)) {
-                    Rename-Item -LiteralPath $file.FullName -NewName $newName
-                    Write-Host "  + $($file.Name) -> $newName"
-                } else {
-                    Write-Host "  ! Skipped (exists): $newName in $($file.DirectoryName)"
-                }
-            }
-        }
-    }
+Write-Host ("Repo:   {0}" -f (Split-Path -Leaf $repo))
+Write-Host ("Branch: {0}" -f $branch)
+Write-Section ""
+
+# 1) Normalize filenames first (works even if dirty; we’ll autostash/commit as needed)
+Normalize-LeetCode-Filenames
+
+Write-Host "Pulling latest with rebase..."
+# Try a clean pull with autostash. If that fails due to policy or other issue, fallback later.
+$pullOk = $true
+try {
+  git pull --rebase --autostash
+} catch {
+  $pullOk = $false
+  Write-Warning "Pull with rebase failed (probably due to unstaged/index changes)."
 }
 
-# -------------------------------
-# Pull (only when appropriate)
-# -------------------------------
-if ($hasCommits -and $hasOrigin) {
-    git ls-remote --exit-code --heads origin $branch *> $null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "Pulling latest with rebase..."
-        git pull --rebase origin $branch
-    } else {
-        Write-Host "Remote branch 'origin/$branch' not found. Will push after committing."
-    }
-} elseif ($hasCommits -and -not $hasOrigin) {
-    Write-Host "No 'origin' remote configured. Skipping pull."
+# 2) Stage & commit anything pending (rename, edits, etc.)
+if (Git-IsDirty) {
+  Write-Host "Staging changes..."
+  git add -A
+  if ($Message -and $Message.Trim().Length -gt 0) {
+    $msg = $Message
+  } else {
+    $msg = "sync: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+  }
+
+  Write-Host "Committing: $msg"
+  try {
+    git commit -m "$msg"
+  } catch {
+    # No changes to commit (race with autostash), ignore
+  }
 } else {
-    Write-Host "No commits yet in this repo. Will create the initial commit if needed."
+  Write-Host "No changes to commit."
 }
 
-# -------------------------------
-# Stage, commit, push
-# -------------------------------
-Write-Host "Staging changes..."
-git add -A
-
-$staged = git diff --cached --name-only
-if (-not [string]::IsNullOrWhiteSpace($staged)) {
-    Write-Host "Committing: $Message"
-    git commit -m "$Message"
-    $hasCommits = $true
-} else {
-    Write-Host "No staged changes to commit."
+# 3) If the initial pull failed, retry now that we have a clean index
+if (-not $pullOk) {
+  Write-Host "Retrying pull --rebase now that changes are committed..."
+  git pull --rebase
 }
 
-if ($hasCommits) {
-    if (-not $hasOrigin) {
-        Write-Host "No 'origin' remote configured. Add it, e.g.:"
-        Write-Host "  git remote add origin https://github.com/<user>/<repo>.git"
-        Write-Host "Then rerun this script."
-        exit 0
-    }
-    Write-Host "Pushing to origin/$branch..."
-    git push -u origin $branch
-} else {
-    Write-Host "Nothing to push."
+# 4) Push; if rejected, fetch+rebase then push again
+Write-Host "Pushing to origin/$branch..."
+try {
+  git push origin $branch
+} catch {
+  Write-Warning "Push rejected. Remote is ahead; rebasing on origin/$branch..."
+  git fetch origin
+  git rebase origin/$branch
+  Write-Host "Re-pushing..."
+  git push origin $branch
 }
 
 Write-Host "Done."
